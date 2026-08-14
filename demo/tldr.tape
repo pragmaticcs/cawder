@@ -6,7 +6,7 @@ Set WindowBar Colorful
 Set BorderRadius 10
 Set Margin 20
 Set Width 1200
-Set Height 480
+Set Height 600
 Set FontSize 18
 Set TypingSpeed 70ms
 Set CursorBlink false
