@@ -2,10 +2,8 @@
 
 Cawder is a minimal coding agent harness designed primarily for local models, while also supporting cloud providers exposing an OpenAI-compatible API.
 
-<p align="center">
-  <img src="demo/tldr.gif" alt="Cawder TUI Demo" width="800">
-</p>
-
+<img src="demo/tldr.gif" alt="Cawder TUI Demo">
+    
 ## Features
 
 - **Agent Capabilities**: provides the model with unsandboxed tools for reading, writing, editing files and command execution.
