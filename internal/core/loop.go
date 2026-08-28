@@ -29,6 +29,7 @@ func NewAgentLoop(model config.AgentModel, system string, session *memory.Sessio
 	registry.Register(tools.NewWriteFileTool())
 	registry.Register(tools.NewEditFileTool())
 	registry.Register(tools.NewExecCommandTool())
+	registry.Register(tools.NewSearchTool())
 
 	mem := memory.NewContextManager(
 		system,

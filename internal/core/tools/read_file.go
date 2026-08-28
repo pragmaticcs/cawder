@@ -9,8 +9,10 @@ import (
 	"strings"
 )
 
-const defaultReadFileLines = 400
-const maxReadFileLineBytes = 10 * 1024 * 1024
+const (
+	defaultReadFileLines = 400
+	maxReadFileLineBytes = 10 * 1024 * 1024
+)
 
 type ReadFileTool struct{}
 
@@ -23,7 +25,9 @@ func (t *ReadFileTool) Name() string {
 }
 
 func (t *ReadFileTool) Description() string {
-	return "Reads a file's contents as numbered lines (1-based, like `cat -n`: a right-aligned line number, a tab, then the line). Large files return only a window - pass offset (1-based start line) and limit (max lines, default 400; <=0 reads to end) to page through the rest."
+	return "Reads up to " + string(defaultReadFileLines) + " lines from a text file with 1-based line numbers. " +
+		"Use offset to start at a specific line and limit to control how many lines are returned. " +
+		"Use another read_file call to page through the file."
 }
 
 func (t *ReadFileTool) Schema() map[string]any {
@@ -32,15 +36,15 @@ func (t *ReadFileTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"path": map[string]any{
 				"type":        "string",
-				"description": "The path to the file to read.",
+				"description": "Path to the file to read.",
 			},
 			"offset": map[string]any{
 				"type":        "integer",
-				"description": "1-based line number to start from (default 1).",
+				"description": "1-based line number to start from. Defaults to 1.",
 			},
 			"limit": map[string]any{
 				"type":        "integer",
-				"description": "Max lines to return (default 400; <=0 reads to the end of the file).",
+				"description": fmt.Sprintf("Maximum number of lines to return. Defaults to %d and must be greater than 0.", defaultReadFileLines),
 			},
 		},
 		"required":             []string{"path"},
@@ -54,59 +58,123 @@ func (t *ReadFileTool) Call(ctx context.Context, args json.RawMessage) (ToolCall
 		Offset int    `json:"offset"`
 		Limit  *int   `json:"limit"`
 	}
+
 	if err := json.Unmarshal(args, &input); err != nil {
-		return ToolCallResult{Content: "Failed to parse arguments: " + err.Error(), Error: true}, nil
-	}
-	if input.Path == "" {
-		return ToolCallResult{Content: "path is required", Error: true}, nil
-	}
-
-	f, err := os.Open(input.Path)
-	if err != nil {
-		return ToolCallResult{Content: "Failed to read file: " + err.Error(), Error: true}, nil
-	}
-	defer f.Close()
-
-	var lines []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), maxReadFileLineBytes)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		return ToolCallResult{Content: "Failed to read file: " + err.Error(), Error: true}, nil
-	}
-
-	total := len(lines)
-	if total == 0 {
-		return ToolCallResult{Content: fmt.Sprintf("[%s: empty file]", input.Path), MainArg: input.Path}, nil
-	}
-
-	start := input.Offset - 1
-	start = max(start, 0)
-	if start >= total {
 		return ToolCallResult{
-			Content: fmt.Sprintf("[%s: %d lines; offset %d is past end of file]", input.Path, total, start+1),
+			Content: "error: invalid arguments: " + err.Error(),
 			Error:   true,
 		}, nil
 	}
 
+	if input.Path == "" {
+		return ToolCallResult{
+			Content: "error: path is required",
+			Error:   true,
+		}, nil
+	}
+
+	offset := input.Offset
+	if offset <= 0 {
+		offset = 1
+	}
+
 	limit := defaultReadFileLines
 	if input.Limit != nil {
+		if *input.Limit <= 0 {
+			return ToolCallResult{
+				Content: "error: limit must be greater than 0",
+				Error:   true,
+			}, nil
+		}
 		limit = *input.Limit
 	}
-	end := total
-	if limit > 0 && start+limit < total {
-		end = start + limit
+
+	f, err := os.Open(input.Path)
+	if err != nil {
+		return ToolCallResult{
+			Content: fmt.Sprintf("error: failed to open %s: %v", input.Path, err),
+			Error:   true,
+		}, nil
 	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), maxReadFileLineBytes)
 
 	var b strings.Builder
-	if start > 0 || end < total {
-		fmt.Fprintf(&b, "[%s: lines %d-%d of %d; call read_file with offset/limit to page]\n", input.Path, start+1, end, total)
-	}
-	for i := start; i < end; i++ {
-		fmt.Fprintf(&b, "%6d\t%s\n", i+1, lines[i])
+
+	lineNo := 0
+	linesReturned := 0
+	more := false
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return ToolCallResult{
+				Content: "error: read cancelled",
+				Error:   true,
+			}, nil
+		}
+
+		lineNo++
+
+		if lineNo < offset {
+			continue
+		}
+
+		if linesReturned >= limit {
+			more = true
+			break
+		}
+
+		fmt.Fprintf(&b, "%6d\t%s\n", lineNo, scanner.Text())
+		linesReturned++
 	}
 
-	return ToolCallResult{Content: b.String(), MainArg: input.Path}, nil
+	if err := scanner.Err(); err != nil {
+		return ToolCallResult{
+			Content: fmt.Sprintf("error: failed to read %s: %v", input.Path, err),
+			Error:   true,
+		}, nil
+	}
+
+	if lineNo == 0 {
+		return ToolCallResult{
+			Content: fmt.Sprintf("[%s: empty file]", input.Path),
+			MainArg: input.Path,
+		}, nil
+	}
+
+	if linesReturned == 0 && offset > lineNo {
+		return ToolCallResult{
+			Content: fmt.Sprintf(
+				"error: %s has %d lines; offset %d is past the end of the file",
+				input.Path,
+				lineNo,
+				offset,
+			),
+			Error: true,
+		}, nil
+	}
+
+	end := offset + linesReturned - 1
+
+	var header strings.Builder
+	fmt.Fprintf(
+		&header,
+		"[%s: lines %d-%d",
+		input.Path,
+		offset,
+		end,
+	)
+
+	if more {
+		header.WriteString("; more lines follow")
+	}
+
+	header.WriteString("]\n")
+
+	return ToolCallResult{
+		Content: header.String() + b.String(),
+		MainArg: input.Path,
+	}, nil
 }
