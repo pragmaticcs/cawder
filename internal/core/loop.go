@@ -57,10 +57,11 @@ func (a *AgentLoop) SetModel(model config.AgentModel) {
 }
 
 type agentTurn struct {
-	content   strings.Builder
-	reasoning strings.Builder
-	toolCalls []parser.ToolCall
-	err       string
+	content      strings.Builder
+	reasoning    strings.Builder
+	toolCalls    []parser.ToolCall
+	err          string
+	finishReason string
 }
 
 func (t *agentTurn) absorb(ev parser.Event) parser.Event {
@@ -77,6 +78,8 @@ func (t *agentTurn) absorb(ev parser.Event) parser.Event {
 	case parser.ParserEventToolCallError:
 		t.content.WriteString(ev.Text)
 		t.err = ev.Err
+	case parser.ParserEventDone:
+		t.finishReason = ev.FinishReason
 	}
 	return ev
 }
@@ -124,10 +127,10 @@ func (a *AgentLoop) runOnce(ctx context.Context, out chan<- AgentEvent) ([]parse
 
 	turn := agentTurn{}
 	emit := func(ev parser.Event) bool {
+		ev = turn.absorb(ev)
 		if ev.Type == parser.ParserEventDone {
 			return true
 		}
-		ev = turn.absorb(ev)
 		if aev := a.toAgentEvent(ev); aev != nil {
 			return common.TrySend(ctx, out, aev)
 		}
@@ -144,6 +147,12 @@ func (a *AgentLoop) runOnce(ctx context.Context, out chan<- AgentEvent) ([]parse
 					if !emit(ev) {
 						return nil, ctx.Err()
 					}
+				}
+				if turn.finishReason == "length" && len(turn.toolCalls) > 0 {
+					return nil, fmt.Errorf("model response truncated (finish_reason: length); tool call arguments are incomplete")
+				}
+				if turn.err != "" {
+					return nil, fmt.Errorf("tool call error: %s", turn.err)
 				}
 				if err := a.memory.AddAgentMessage(turn.content.String(), toMemoryToolCalls(turn.toolCalls)); err != nil {
 					return nil, err
@@ -201,7 +210,13 @@ func (a *AgentLoop) callTool(ctx context.Context, tc parser.ToolCall) (tools.Too
 	if !ok {
 		return tools.ToolCallResult{}, fmt.Errorf("unknown tool %q", tc.Name)
 	}
-	return t.Call(ctx, json.RawMessage(tc.Arguments))
+
+	rawArgs := strings.TrimSpace(tc.Arguments)
+	if rawArgs == "" {
+		rawArgs = "{}"
+	}
+
+	return t.Call(ctx, json.RawMessage(rawArgs))
 }
 
 func toMemoryToolCalls(calls []parser.ToolCall) []memory.ToolCall {

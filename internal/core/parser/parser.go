@@ -133,7 +133,11 @@ func NewParser(conventions ...Convention) *Parser {
 func (p *Parser) Reset() {
 	convs := p.conventions
 	maxBytes := p.MaxCaptureBytes
-	*p = Parser{conventions: convs, MaxCaptureBytes: maxBytes, nativeCalls: make(map[int64]*nativeCall)}
+	*p = Parser{
+		conventions:     convs,
+		MaxCaptureBytes: maxBytes,
+		nativeCalls:     make(map[int64]*nativeCall),
+	}
 }
 
 func (p *Parser) Feed(chunk openai.ChatCompletionChunk) []Event {
@@ -360,19 +364,11 @@ func (p *Parser) closeCapture(conv *Convention, body string) []Event {
 func (p *Parser) feedNativeToolCall(d ToolCallDeltaRaw) []Event {
 	var events []Event
 
-	if p.haveNative && p.lastNativeIdx != d.Index {
-		if e := p.finalizeNativeCall(p.lastNativeIdx); e != nil {
-			events = append(events, *e)
-		}
-	}
-
 	c, ok := p.nativeCalls[d.Index]
 	if !ok {
 		c = &nativeCall{}
 		p.nativeCalls[d.Index] = c
 		p.nativeOrder = append(p.nativeOrder, d.Index)
-	} else if c.done {
-		*c = nativeCall{}
 	}
 
 	isNew := !c.started
@@ -403,8 +399,14 @@ func (p *Parser) finalizeNativeCall(idx int64) *Event {
 		return nil
 	}
 	c.done = true
+
+	args := strings.TrimSpace(c.args)
+	if args == "" {
+		args = "{}"
+	}
+
 	return &Event{Type: ParserEventToolCall, ToolCall: ToolCall{
-		Index: int(idx), ID: c.id, Name: c.name, Arguments: c.args,
+		Index: int(idx), ID: c.id, Name: c.name, Arguments: args,
 		Source: SourceNative, Convention: nativeConventionName,
 	}}
 }
@@ -498,7 +500,11 @@ func rawCallFromValue(v any) (rawCall, error) {
 	case nil:
 		return rawCall{Name: name, Arguments: "{}"}, nil
 	case string:
-		return rawCall{Name: name, Arguments: a}, nil
+		trimmed := strings.TrimSpace(a)
+		if trimmed == "" {
+			trimmed = "{}"
+		}
+		return rawCall{Name: name, Arguments: trimmed}, nil
 	default:
 		b, err := json.Marshal(a)
 		if err != nil {
